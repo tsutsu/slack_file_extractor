@@ -248,8 +248,14 @@ defmodule SlackFileExtractor.Job do
       %HTTPoison.AsyncRedirect{id: ^ref, to: new_uri} ->
         case :file.position(io_device, :cur) do
           {:ok, 0} ->
-            new_uri = parse_redirect_location(new_uri, effective_uri)
-            really_cache_url_head!(cache_entry, io_device, new_uri)
+            case parse_redirect_location(new_uri, effective_uri) do
+              nil ->
+                File.close(io_device)
+                {:error, {:invalid_redirect, new_uri}}
+              new_abs_uri ->
+                really_cache_url_head!(cache_entry, io_device, new_abs_uri)
+            end
+
           {:ok, _} ->
             raise RuntimeError, "redirect after chunks delivered"
         end
@@ -268,11 +274,10 @@ defmodule SlackFileExtractor.Job do
     end
   end
 
-  def parse_redirect_location(("http://" <> _) = new_uri, _old_uri), do: new_uri
-  def parse_redirect_location(("https://" <> _) = new_uri, _old_uri), do: new_uri
-  def parse_redirect_location(("//" <> _) = new_uri, old_uri) do
-    [URI.parse(old_uri).scheme, ":", new_uri]
-  end
+  def parse_redirect_location(("http://" <> _) = new_uri, old_uri), do: parse_abs_redirect(new_uri, old_uri)
+  def parse_redirect_location(("https://" <> _) = new_uri, old_uri), do: parse_abs_redirect(new_uri, old_uri)
+  def parse_redirect_location(("//" <> _) = new_uri, old_uri), do: parse_abs_redirect(new_uri, old_uri)
+
   def parse_redirect_location(new_uri, old_uri) do
     old = URI.parse(old_uri)
     new = URI.parse(new_uri) |> Map.from_struct() |> Enum.filter(fn {_, v} -> v != nil end)
@@ -293,6 +298,24 @@ defmodule SlackFileExtractor.Job do
     new = Keyword.put(new, :path, new_path)
 
     struct(old, new)
+  end
+
+  defp parse_abs_redirect(new_uri, old_uri) do
+    new = URI.parse(new_uri)
+
+    new = case new.scheme do
+      nil ->
+        struct(new, scheme: URI.parse(old_uri).scheme)
+
+      scheme when is_binary(scheme) ->
+        new
+    end
+
+    case new.host do
+      nil -> nil
+      "" -> nil
+      _host -> URI.to_string(new)
+    end
   end
 
   def expose_url_as_file!(%{channel: channel_name, timestamp: event_dt, uri: uri} = event, state) do
