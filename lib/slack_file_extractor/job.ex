@@ -336,7 +336,7 @@ defmodule SlackFileExtractor.Job do
         uri_rootname = Path.rootname(uri_filename)
         uri_extname = Path.extname(uri_filename)
 
-        formatted_ts = Timex.format(event_dt, "{YYYY}-{0M}-{0D} {0h24}:{0m}:{0s}")
+        formatted_ts = Timex.format!(event_dt, "{YYYY}-{0M}-{0D} {0h24}:{0m}:{0s}")
 
         expose_filename = "#{uri_rootname} (#{channel_name} on #{formatted_ts})#{uri_extname}"
 
