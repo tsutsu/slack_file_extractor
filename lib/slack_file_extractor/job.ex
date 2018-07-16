@@ -344,7 +344,7 @@ defmodule SlackFileExtractor.Job do
 
         unless File.exists?(expose_path) do
           File.ln!(cache_entry.body_path, expose_path)
-          Logger.info("  - ln '#{expose_path}'")
+          Logger.debug("  - ln '#{expose_path}'")
         end
     end
   end
