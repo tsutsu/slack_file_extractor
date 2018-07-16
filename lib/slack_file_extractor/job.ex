@@ -249,6 +249,7 @@ defmodule SlackFileExtractor.Job do
                 File.close(io_device)
                 {:error, {:invalid_redirect, new_uri}}
               new_abs_uri ->
+                Logger.debug("redirecting to '#{new_abs_uri}'")
                 really_cache_url_head!(cache_entry, io_device, new_abs_uri)
             end
 
