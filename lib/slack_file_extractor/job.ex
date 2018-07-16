@@ -9,12 +9,10 @@ defmodule SlackFileExtractor.Job do
   def init({opts, []}, session) do
     source_path = Keyword.get(opts, :source, Path.join(File.cwd!(), "export_archive"))
 
-    files_dir = Path.join(source_path, "_files")
     toc_path = Path.join(session.path, "toc.etfs")
 
     %{
       source_path: source_path,
-      files_dir: files_dir,
       toc_path: toc_path
     }
   end
@@ -84,8 +82,6 @@ defmodule SlackFileExtractor.Job do
   end
 
   def handle_step(:expose_downloads_as_files, state) do
-    File.mkdir_p!(state.files_dir)
-
     toc = ETFs.stream!(state.toc_path)
     uri_count = Enum.count(toc)
 
@@ -330,19 +326,37 @@ defmodule SlackFileExtractor.Job do
         raise RuntimeError, "uri '#{uri}' missing cache entry '#{cache_entry.raw_path}'"
 
       :downloaded ->
-        uri_path = URI.parse(uri).path
+        uri = URI.parse(uri)
 
-        uri_filename = Path.basename(uri_path)
+        uri_filename = Path.basename(uri.path)
         uri_rootname = Path.rootname(uri_filename)
         uri_extname = Path.extname(uri_filename)
 
-        formatted_ts = Timex.format!(event_dt, "{YYYY}-{0M}-{0D} {0h24}:{0m}:{0s}")
+        expose_rootname = case uri_rootname do
+          overlong_str when byte_size(overlong_str) > 100 ->
+            [String.slice(overlong_str, 0, 98), "…", String.slice(overlong_str, -2, 2)]
 
-        expose_filename = "#{uri_rootname} (#{channel_name} on #{formatted_ts})#{uri_extname}"
+          "" ->
+            "untitled image"
 
-        expose_path = Path.join(state.files_dir, expose_filename)
+          str ->
+            str
+        end
+
+        formatted_date = Timex.format!(event_dt, "{YYYY}-{0M}-{0D}")
+        formatted_time = Timex.format!(event_dt, "{0h24}-{0m}-{0s}{ss}")
+
+        {expose_type, expose_filename} = case uri.host do
+          "files.slack.com" ->
+            {"#{formatted_date}_files", "#{expose_rootname} (at #{formatted_time})#{uri_extname}"}
+          fqdn ->
+            {"#{formatted_date}_links", "#{expose_rootname} (from #{fqdn}, at #{formatted_time})#{uri_extname}"}
+        end
+
+        expose_path = Path.join([state.source_path, channel_name, expose_type, expose_filename])
 
         unless File.exists?(expose_path) do
+          File.mkdir_p!(Path.dirname(expose_path))
           File.ln!(cache_entry.body_path, expose_path)
           Logger.debug("  - ln '#{expose_path}'")
         end
