@@ -180,9 +180,11 @@ defmodule SlackFileExtractor.Job do
 
     case cache_entry.status do
       :downloaded ->
+        Logger.debug("already downloaded: '#{uri}'")
         :ok
 
       {:error, e} ->
+        Logger.debug("has error: '#{uri}' => '#{inspect e}'")
         {:error, e}
 
       :new ->
@@ -202,47 +204,59 @@ defmodule SlackFileExtractor.Job do
   defp really_cache_url!(cache_entry) do
     Temp.track!()
 
-    Logger.info("  - GET #{cache_entry.uri}")
-
     tmpfile_path = Temp.path!("slack_file_extractor")
 
     File.touch!(tmpfile_path)
     io_device = File.open!(tmpfile_path, [:append])
 
-    case really_cache_url_head!(cache_entry, cache_entry.uri, io_device) do
+    case really_cache_url_head!(cache_entry, io_device, cache_entry.uri) do
       :ok ->
+        resp_size = File.stat!(tmpfile_path).size
+        Logger.info("  - retrieved #{cache_entry.uri}: #{resp_size} bytes")
         File.ln!(tmpfile_path, cache_entry.body_path)
         :downloaded
 
       {:error, detail} ->
+        Logger.error(" - #{inspect detail} for '#{cache_entry.uri}'")
         File.write!(cache_entry.status_path, :erlang.term_to_binary(detail))
         {:error, detail}
     end
   end
 
-  def really_cache_url_head!(cache_entry, effective_uri, io_device) do
-    case HTTPoison.get(effective_uri, %{}, stream_to: self(), timeout: 50_000, recv_timeout: 50_000, follow_redirect: true, hackney: [pool: :default]) do
+  def really_cache_url_head!(cache_entry, io_device, effective_uri) do
+    case HTTPoison.get(effective_uri, %{}, stream_to: self(), timeout: 50_000, recv_timeout: 50_000, follow_redirect: true, hackney: [:insecure, pool: :default]) do
       {:ok, %HTTPoison.AsyncResponse{id: ref}} ->
-        really_cache_url_chunk!(cache_entry, ref, io_device)
+        really_cache_url_chunk!(cache_entry, io_device, effective_uri, ref)
 
       {:error, e} ->
         {:error, e}
     end
   end
 
-  defp really_cache_url_chunk!(cache_entry, ref, io_device) do
+  defp really_cache_url_chunk!(cache_entry, io_device, effective_uri, ref) do
     receive do
+      %HTTPoison.AsyncHeaders{id: ^ref} ->
+        really_cache_url_chunk!(cache_entry, io_device, effective_uri, ref)
+
+      %HTTPoison.AsyncStatus{id: ^ref, code: n} when n < 400 ->
+        really_cache_url_chunk!(cache_entry, io_device, effective_uri, ref)
+
+      %HTTPoison.AsyncStatus{id: ^ref, code: n} when n >= 400 ->
+        File.close(io_device)
+        {:error, {:http_status, n}}
+
       %HTTPoison.AsyncRedirect{id: ^ref, to: new_uri} ->
         case :file.position(io_device, :cur) do
           {:ok, 0} ->
-            really_cache_url_head!(cache_entry, new_uri, io_device)
+            new_uri = parse_redirect_location(new_uri, effective_uri)
+            really_cache_url_head!(cache_entry, io_device, new_uri)
           {:ok, _} ->
             raise RuntimeError, "redirect after chunks delivered"
         end
 
       %HTTPoison.AsyncChunk{chunk: body_chunk, id: ^ref} ->
         IO.binwrite(io_device, body_chunk)
-        really_cache_url_chunk!(cache_entry, ref, io_device)
+        really_cache_url_chunk!(cache_entry, io_device, effective_uri, ref)
 
       %HTTPoison.AsyncEnd{id: ^ref} ->
         File.close(io_device)
@@ -252,6 +266,33 @@ defmodule SlackFileExtractor.Job do
         File.close(io_device)
         {:error, other}
     end
+  end
+
+  def parse_redirect_location(("http://" <> _) = new_uri, _old_uri), do: new_uri
+  def parse_redirect_location(("https://" <> _) = new_uri, _old_uri), do: new_uri
+  def parse_redirect_location(("//" <> _) = new_uri, old_uri) do
+    [URI.parse(old_uri).scheme, ":", new_uri]
+  end
+  def parse_redirect_location(new_uri, old_uri) do
+    old = URI.parse(old_uri)
+    new = URI.parse(new_uri) |> Map.from_struct() |> Enum.filter(fn {_, v} -> v != nil end)
+
+    new_path = case {old.path, new[:path]} do
+      {old_path, nil} -> old_path
+
+      {_, ("/" <> _) = path} ->
+        path
+
+      {nil, rel_path} ->
+        "/" <> rel_path
+
+      {old_abs_path, rel_path} ->
+        Path.join(old_abs_path, rel_path) |> Path.expand()
+    end
+
+    new = Keyword.put(new, :path, new_path)
+
+    struct(old, new)
   end
 
   def expose_url_as_file!(%{channel: channel_name, timestamp: event_dt, uri: uri} = event, state) do
